@@ -137,12 +137,17 @@ async function extractInPage(videoId) {
       .replace(/\?fmt=srv3$/g, "");
   }
 
+  // Only English output is ever wanted. Real English tracks are used as-is;
+  // any other language (e.g. a Hindi auto-generated track) is machine
+  // translated to English via YouTube's tlang param rather than returned
+  // in its original language.
   function pickEnglishTrack(tracks) {
-    if (!tracks?.length) return null;
+    if (!tracks?.length) return [];
     const scored = tracks.map((track) => {
       const code = (track.languageCode || "").toLowerCase();
+      const isEnglish = code === "en" || code.startsWith("en-");
       let score = 0;
-      if (code === "en" || code.startsWith("en-")) score += 10;
+      if (isEnglish) score += 10;
       if (!track.kind || track.kind !== "asr") score += 5;
       const name = (
         track.name?.simpleText ||
@@ -152,10 +157,10 @@ async function extractInPage(videoId) {
       if (name.includes("english")) score += 3;
       // Prefer URLs that don't require poToken
       if (track.baseUrl && !track.baseUrl.includes("exp=xpe")) score += 2;
-      return { track, score };
+      return { track, score, isEnglish };
     });
     scored.sort((a, b) => b.score - a.score);
-    return scored.map((s) => s.track);
+    return scored;
   }
 
   function getApiKey() {
@@ -200,11 +205,14 @@ async function extractInPage(videoId) {
     };
   }
 
-  async function fetchCaptionText(baseUrl) {
-    const url = cleanCaptionUrl(baseUrl);
+  async function fetchCaptionText(baseUrl, { forceEnglish = false } = {}) {
+    let url = cleanCaptionUrl(baseUrl);
     if (!url) throw new Error("Empty caption URL");
     if (url.includes("exp=xpe")) {
       throw new Error("Caption URL requires poToken (skipped)");
+    }
+    if (forceEnglish && !/[?&]tlang=/.test(url)) {
+      url += (url.includes("?") ? "&" : "?") + "tlang=en";
     }
 
     const res = await fetch(url, { credentials: "include" });
@@ -275,9 +283,11 @@ async function extractInPage(videoId) {
         }
 
         const ordered = pickEnglishTrack(tracks);
-        for (const track of ordered) {
+        for (const { track, isEnglish } of ordered) {
           try {
-            const text = await fetchCaptionText(track.baseUrl);
+            const text = await fetchCaptionText(track.baseUrl, {
+              forceEnglish: !isEnglish,
+            });
             if (text) {
               return { metadata: metadata || metadataFromPlayer(data), transcript: text };
             }
@@ -324,6 +334,51 @@ async function extractInPage(videoId) {
         await sleep(1200);
       }
     }
+
+    // The transcript panel opens in whatever language YouTube's ASR/track
+    // defaults to (e.g. Hindi). Switch its language dropdown to English
+    // before scraping so we never return non-English text.
+    async function switchTranscriptLanguageToEnglish() {
+      for (let i = 0; i < 10; i++) {
+        const langButton =
+          document.querySelector(
+            "ytd-transcript-search-panel-renderer #dropdown button, ytd-transcript-search-panel-renderer tp-yt-paper-button"
+          ) ||
+          [...document.querySelectorAll("button, tp-yt-paper-button")].find(
+            (b) =>
+              /english/i.test(b.textContent || "") === false &&
+              /auto-generated|auto-translated/i.test(
+                b.textContent || b.getAttribute("aria-label") || ""
+              )
+          );
+        if (langButton) {
+          const label = (langButton.textContent || "").trim();
+          if (/^english\b/i.test(label)) return true; // already English
+          langButton.click();
+          await sleep(400);
+          const items = [
+            ...document.querySelectorAll(
+              "tp-yt-paper-item, ytd-menu-service-item-renderer"
+            ),
+          ];
+          const englishItem = items.find((el) =>
+            /^english\b/i.test((el.textContent || "").trim())
+          );
+          if (englishItem) {
+            englishItem.click();
+            await sleep(800);
+            return true;
+          }
+          // No English option in the menu; close it and give up switching.
+          langButton.click();
+          return false;
+        }
+        await sleep(200);
+      }
+      return false;
+    }
+
+    await switchTranscriptLanguageToEnglish();
 
     // Wait for segments to appear
     for (let i = 0; i < 15; i++) {
@@ -372,9 +427,11 @@ async function extractInPage(videoId) {
     const tracks =
       window.ytInitialPlayerResponse?.captions
         ?.playerCaptionsTracklistRenderer?.captionTracks || [];
-    for (const track of pickEnglishTrack(tracks) || []) {
+    for (const { track, isEnglish } of pickEnglishTrack(tracks)) {
       try {
-        transcript = await fetchCaptionText(track.baseUrl);
+        transcript = await fetchCaptionText(track.baseUrl, {
+          forceEnglish: !isEnglish,
+        });
         if (transcript) break;
       } catch (e) {
         lastError = e.message || String(e);
