@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>YouTube Transcript Saver</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main>
+    <h1>YT Transcript</h1>
+    <p class="hint">Open a YouTube video, then load the transcript here.</p>
+
+    <div class="actions">
+      <button id="loadBtn" type="button">Load Transcript</button>
+      <button id="downloadBtn" type="button" disabled>Download .txt</button>
+    </div>
+
+    <p id="status" class="status" aria-live="polite"></p>
+
+    <pre id="content" class="content" hidden></pre>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
